@@ -9,6 +9,7 @@
 client_id = Text.FromBinary(Extension.Contents("client_id"));
 client_secret = Text.FromBinary(Extension.Contents("client_secret"));
 authorize_url = "https://accounts.google.com/o/oauth2/auth";
+token_url = "https://accounts.google.com/o/oauth2/token";
 redirect_url = "https://oauth.powerbi.com/views/oauthredirect.html";
 
 // Base URL
@@ -139,8 +140,11 @@ StartLogin = (resourceUrl, state, display) =>
     let
         AuthorizeUrl = authorize_url & "?" & Uri.BuildQueryString([
             client_id = client_id,  
-            redirect_uri = redirect_url,      
+            redirect_uri = redirect_url,  
+            state = state,    
             scope = GetScopeString(scopes, scope_prefix),
+            access_type = "offline",
+            prompt = "consent",
             response_type = "code",
             response_mode = "query",
             login = "login"    
@@ -155,27 +159,47 @@ StartLogin = (resourceUrl, state, display) =>
         ];
 
 FinishLogin = (context, callbackUri, state) =>
-    let
-        Parts = Uri.Parts(callbackUri)[Query]
+      let
+        // parse the full callbackUri, and extract the Query string
+        Parts = Uri.Parts(callbackUri)[Query],
+        // if the query string contains an "error" field, raise an error
+        // otherwise call TokenMethod to exchange our code for an access_token
+        result = if (Record.HasFields(Parts, {"error", "error_description"})) then 
+                    error Error.Record(Parts[error], Parts[error_description], Parts)
+                 else
+                    TokenMethod("authorization_code", "code", Parts[code])
     in
-        TokenMethod("authorization_code", Parts[code]);
+        result;
 
-TokenMethod = (grant_type, code) =>
-    let
-        Token = Web.Contents("https://accounts.google.com/o/oauth2/token", [
-            Content = Text.ToBinary(Uri.BuildQueryString([
-                client_id = client_id,
-                client_secret = client_secret,
-                redirect_uri = redirect_url,
-                code = code,
-                grant_type = grant_type
-                ])),
-            Headers=[#"Content-type" = "application/x-www-form-urlencoded", #"Accept" = "application/json"]]),
-            Parts = Json.Document(Token)
+Refresh = (resourceUrl, refresh_token) => TokenMethod("refresh_token","refresh_token", refresh_token);
+
+TokenMethod = (grantType, tokenField, code) =>
+    let     
+        queryString =[
+            client_id = client_id,
+            client_secret = client_secret,
+            redirect_uri = redirect_url,
+            grant_type = grantType
+            ],
+
+        queryWithCode = Record.AddField(queryString, tokenField, code),
+
+        tokenResponse = Web.Contents(token_url, [
+        Content = Text.ToBinary(Uri.BuildQueryString(queryWithCode)),
+        Headers = [
+            #"Content-type" = "application/x-www-form-urlencoded",
+            #"Accept" = "application/json"
+        ],
+        ManualStatusHandling = {400} 
+    ]),
+    body = Json.Document(tokenResponse),
+    
+    result = if (Record.HasFields(body, {"error", "error_description"})) then 
+                error Error.Record(body[error], body[error_description], body)
+            else
+                body
     in
-       Parts;
-
-Refresh = (resourceUrl, refresh_token) => TokenMethod("refresh_token", refresh_token);
+       result;
 
 //
 // Common functions
